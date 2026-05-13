@@ -1,13 +1,3 @@
-*.o
-*.elf
-*.bin
-*.iso
-*.img
-*.map
-*.sym
-*.swp
-*.swo
-tags
-cscope.*
-build/
-.iso/
+target
+build
+/tools/unix-v6pp-filesystem-editor
