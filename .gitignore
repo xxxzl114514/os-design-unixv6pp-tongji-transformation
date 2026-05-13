@@ -1,0 +1,13 @@
+*.o
+*.elf
+*.bin
+*.iso
+*.img
+*.map
+*.sym
+*.swp
+*.swo
+tags
+cscope.*
+build/
+.iso/

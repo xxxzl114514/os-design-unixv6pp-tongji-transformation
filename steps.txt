@@ -1,0 +1,231 @@
+• 按课件和 目标.txt，UNIX V6++ 离散化要完成四件事：页表体系改造、位示图分配、逻辑页离散存放、共享/COW 优化。你这份源码已
+  经做了一部分，但还需要补齐和修 bug。
+
+  总体目标
+  目标.txt 的要求可以拆成：
+
+  1. 不使用盘交换区。
+  2. 所有用户逻辑页离散存放，不再要求正文/数据/栈连续物理页框。
+  3. fork 使用 COW：父子共享数据页和栈页，写时复制。
+  4. exec 给用户栈分配物理页框，接收命令行参数后直接挂到用户页表，避免再做内存复制。
+  5. 正文段共享：Text 结构中保存正文段物理页框号数组。
+
+  你应该按这个顺序完成
+
+  1. 页表系统先改对
+
+  课件第 7-18 页的重点是：每个进程有自己的页目录和 1# 用户页表，切换进程时切换 CR3。
+
+  对应文件：
+
+  - src_V5/proc/ProcessManager.cpp:31
+  - src_V5/proc/MemoryDescriptor.cpp:8
+  - src_V5/proc/Process.cpp:21
+  - src_V5/include/ProcessManager.h:168
+
+  你现在已经有：
+
+  - AllocPageDirectory()
+  - InitProcPageDirectory()
+  - Process::GetPageDirectoryPhyAddr()
+  - MemoryDescriptor::Initialize()
+  - MemoryDescriptor::Release()
+  - MemoryDescriptor::MapToPageTable()
+
+  需要确认它们全部生效：新进程创建时分配一张页目录、一张 1# 用户页表；页目录 0# 项指向公共 0# 用户页表，768# 项指向内核
+  页表，1# 项指向该进程自己的用户页表；SwtchUStruct 和 MapToPageTable() 都用当前进程自己的 CR3。
+
+  2. 位示图分配必须作为底层基础
+
+  课件第 22-27 页要求把 PageManager 改成位示图分配。你已经有 BitMapAllocator 和 PageManager::bitmap：
+
+  - src_V5/mm/Allocator.cpp:127
+  - src_V5/mm/PageManager.cpp:27
+  - src_V5/include/PageManager.h:22
+
+  检查点：
+
+  - KernelPageManager 管理 2M+16K 到 4M 的页表区。
+  - UserPageManager 管理 4M 之后的用户物理页区。
+  - AllocMemory(size) 可以分配任意页数，但离散化的用户页最好按页分配。
+  - FreeMemory(size, addr) 释放对应页，并处理引用计数。
+
+  3. 正文、数据、栈都要按“逐页分配、逐页填 PTE”
+
+  这是“离散化存储”的核心。不要再假设一个段对应一段连续物理内存。
+
+  在 exec 中：
+
+  - 正文段：每页调用 userPgMgr.AllocMemory(M_PAGE_SIZE)，页框号保存到 Text::x_caddr[]，PTE 只读。
+  - 数据段：每页单独分配，PTE 可写。
+  - 栈段：每页单独分配，PTE 可写，并把命令行参数直接写入这批栈页。
+
+  对应位置：
+
+  - src_V5/proc/ProcessManager.cpp:315
+  - src_V5/proc/ProcessManager.cpp:503
+  - src_V5/pe/PEParser.cpp:21
+
+  你当前 exec 已经按页给正文、数据、栈填 PTE，这个方向是对的。
+
+  4. 正文段共享
+
+  Text 结构现在有：
+
+  - src_V5/include/Text.h:31
+
+  unsigned long x_caddr[10];
+
+  这就是课设要求的“Text 结构中开数组，存放正文段物理页框号”。但这里有个明显限制：只能保存 10 页正文段。最好改成一个足
+  大的常量，例如：
+
+  static const int TEXT_PAGE_MAX = 128;
+  unsigned long x_caddr[TEXT_PAGE_MAX];
+
+  然后在 exec 中检查：
+
+  if (pages > Text::TEXT_PAGE_MAX) {
+      u.u_error = User::ENOMEM;
+      return;
+  }
+
+  共享逻辑是：如果 text[] 中已有相同 inode 的正文段，则不再读文件、不再分配正文页，只把当前进程正文 PTE 指向已有
+  x_caddr[i]，并递增 x_count/x_ccount。
+
+  5. COW
+
+  你现在 COW 的关键逻辑在：
+
+  - src_V5/proc/ProcessManager.cpp:87
+  - src_V5/interrupt/Exception.cpp:233
+
+  fork 时应做：
+
+  - 子进程复制父进程用户页表。
+  - 父子数据页、栈页 PTE 都改成只读。
+  - 每个共享物理页引用计数加一。
+  - 正文段本来就是只读共享，不参与 COW 复制。
+
+  缺页异常中：
+
+  - 如果页存在、PTE 只读、访问是写、地址属于数据段或栈段，说明触发 COW。
+  - 引用计数为 1：直接把 PTE 改回可写。
+  - 引用计数大于 1：分配新页，复制旧页内容，当前 PTE 指向新页，旧页引用计数减一。
+
+  6. 必须修的几个坑
+
+  你当前代码里有几个会直接导致错误的点。
+
+  第一类是运算符优先级错误。比如：
+
+  - src_V5/proc/Process.cpp:203
+  - src_V5/proc/ProcessManager.cpp:443
+  - src_V5/proc/Text.cpp:25
+
+  现在写的是：
+
+  int index = md.m_DataStartAddress >> 12 - 1024;
+
+  这会被解析成：
+
+  md.m_DataStartAddress >> (12 - 1024)
+
+  必须改成：
+
+  int index = (md.m_DataStartAddress >> 12) - 1024;
+
+  栈页同理：
+
+  int index = ((md.USER_SPACE_START_ADDRESS + md.USER_SPACE_SIZE - md.m_StackSize) >> 12) - 1024;
+
+  第二类是 MemoryDescriptor.h 里类内声明不该带类名前缀：
+
+  unsigned int MemoryDescriptor::MapEntry(...);
+
+  应改成：
+
+  unsigned int MapEntry(...);
+
+  第三类是“目标说不使用盘交换区”，但 Exit() 里还在写 swap：
+
+  - src_V5/proc/Process.cpp:179
+
+  这部分需要删除或改成只保留僵尸进程状态信息，不再 AllocSwap()、Bwrite()。
+
+  建议验收方式
+
+  完成后至少测这些程序：
+
+  - fork.exe：父子都能运行。
+  - forks.exe：多次 fork 不崩。
+  - malloc.exe：验证 sbreak 和数据段扩展。
+  - stack.exe：验证栈自动增长。
+  - ls.exe、cat.exe、cp.exe：验证 exec、正文共享、文件读写没破坏。
+  - 自己加一个 COW 测试：fork 后父子分别修改同一个全局变量，确认互不影响。
+
+  核心判断标准：用户页表中的正文、数据、栈每个 PTE 可以指向任意物理页框；fork 后父子初始共享数据/栈页，只有写入时才复
+  制；相同可执行文件的正文段只加载一次。
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+• 下面是按 steps.txt 中每一步对应的“需要修改/确认内容”和当前源码位置整理的清单。
+
+  1. 页表系统改造
+
+  - 每个进程分配独立页目录：src_V5/proc/ProcessManager.cpp:31
+  - 初始化页目录 0#、1#、内核 768# 项：src_V5/proc/ProcessManager.cpp:37
+  - fork 新进程时分配页目录和私有 1# 用户页表：src_V5/proc/ProcessManager.cpp:122
+  - 进程切换时切换 CR3：src_V5/proc/ProcessManager.cpp:163、src_V5/include/ProcessManager.h:34
+  - MemoryDescriptor 分配/释放私有用户页表：src_V5/proc/MemoryDescriptor.cpp:8、src_V5/proc/MemoryDescriptor.cpp:25
+  - 用当前进程页目录刷新映射：src_V5/proc/MemoryDescriptor.cpp:115
+  - 获取进程页目录物理地址：src_V5/proc/Process.cpp:21
+
+  2. 位图分配
+
+  - 位图分配器实现：src_V5/mm/Allocator.cpp:127、src_V5/mm/Allocator.cpp:163
+  - PageManager::AllocMemory/FreeMemory 使用位图并维护引用计数：src_V5/mm/PageManager.cpp:27、src_V5/mm/
+    PageManager.cpp:44
+  - 内核页池范围：src_V5/include/PageManager.h:72、src_V5/mm/PageManager.cpp:78
+  - 用户页池范围：src_V5/include/PageManager.h:84、src_V5/mm/PageManager.cpp:98
+  - 页引用计数数组：src_V5/include/PageManager.h:58
+
+  3. 正文/数据/栈离散化存储
+
+  - exec 入口和整体装载流程：src_V5/proc/ProcessManager.cpp:327
+  - PE 装载/重定位按当前用户页表写入：src_V5/pe/PEParser.cpp:21
+
+  4. 正文段共享
+
+  - Text::x_caddr[] 保存正文段物理页框号：src_V5/include/Text.h:15、src_V5/include/Text.h:33
+  - 初始化正文页框数组：src_V5/proc/Text.cpp:4
+  - 释放共享正文页：src_V5/proc/Text.cpp:22
+  - exec 中查找相同 inode 的正文段并复用：src_V5/proc/ProcessManager.cpp:511
+  - 新正文段分配页框、共享正文段复用 x_caddr[]：src_V5/proc/ProcessManager.cpp:545、src_V5/proc/ProcessManager.cpp:570
+
+  5. COW
+
+  - fork 时复制页表、父子共享数据/栈页并清 RW：src_V5/proc/ProcessManager.cpp:99、src_V5/proc/ProcessManager.cpp:139
+  - 修改父进程页表 RW 并增加引用计数：src_V5/proc/ProcessManager.cpp:99
+  - 页错误中识别 COW 写异常：src_V5/interrupt/Exception.cpp:233
+  - 引用计数为 1 时恢复可写；大于 1 时分配新页并复制：src_V5/interrupt/Exception.cpp:258
+
+  6. 必修 bug/坑位
+
+  - 运算符优先级修正点，当前已是带括号形式：src_V5/proc/Process.cpp:193、src_V5/proc/ProcessManager.cpp:473、src_V5/
+    proc/Text.cpp:33
+  - MemoryDescriptor.h 类内声明不能写 MemoryDescriptor::MapEntry，当前声明位置：src_V5/include/MemoryDescriptor.h:48
+  - Exit() 不再写 swap，只释放数据/栈页并保留僵尸状态：src_V5/proc/Process.cpp:135、src_V5/proc/Process.cpp:179
+  - sbreak 扩展/回收数据段也要逐页处理：src_V5/proc/Process.cpp:354
+  - 栈自动增长逐页分配：src_V5/proc/Process.cpp:320
+
