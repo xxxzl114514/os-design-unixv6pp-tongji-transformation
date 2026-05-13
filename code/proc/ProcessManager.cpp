@@ -68,14 +68,6 @@ void ProcessManager::InitProcPageDirectory(Process *proc, PageTable *privateUsrP
 
 	if (pPageDirectory)
 	{
-		/*for (int i = 0; i < 1024; i++)
-		{
-			pPageDirectory->m_Entrys[i].m_UserSupervisor = 0;
-			pPageDirectory->m_Entrys[i].m_Present = 0;
-			pPageDirectory->m_Entrys[i].m_ReadWriter = 0;
-			pPageDirectory->m_Entrys[i].m_PageTableBaseAddress = 0;
-		}*/
-
 		pPageDirectory->m_Entrys[0].m_UserSupervisor = 1;
 		pPageDirectory->m_Entrys[0].m_Present = 1;
 		pPageDirectory->m_Entrys[0].m_ReadWriter = 1;
@@ -125,7 +117,6 @@ void ProcessManager::SetupProcessZero()
 	u.u_MemoryDescriptor.m_DataSize = 0;
 	u.u_MemoryDescriptor.m_StackSize = 0;
 	u.u_MemoryDescriptor.m_UserPageTableArray = NULL;
-	//	u.u_MemoryDescriptor.Initialize();
 
 	pProcZero->pPageDirectory = (PageDirectory *)(Machine::PAGE_DIRECTORY_BASE_ADDRESS +
 												  Machine::KERNEL_SPACE_START_ADDRESS + 2 * Machine::KERNEL_SPACE_PAGE_SIZE);
@@ -142,7 +133,7 @@ void ProcessManager::ModifyPageTable(UserPageManager &userPageManager, PageTable
 	{
 		if (pgTable->m_Entrys[j].m_Present && pgTable->m_Entrys[j].m_ReadWriter)
 		{
-			// pgTable->m_Entrys[j].m_ReadWriter = 0;
+			pgTable->m_Entrys[j].m_ReadWriter = 0;
 			userPageManager.Page[pgTable->m_Entrys[j].m_PageBaseAddress]++;
 		}
 	}
@@ -179,11 +170,6 @@ int ProcessManager::NewProc()
 	child->pPageDirectory = pPageDirectory;
 	ProcessManager::InitProcPageDirectory(child, desPgTable);
 
-	/*UserPageManager &userPageManager = Kernel::Instance().GetUserPageManager();
-	unsigned long desAddress = userPageManager.AllocMemory(PageManager::PAGE_SIZE);
-
-	SaveU(u.u_rsav);*/
-
 	if (NULL != pgTable)
 	{
 		Utility::MemCopy(
@@ -200,7 +186,7 @@ int ProcessManager::NewProc()
 	UserPageManager &userPageManager = Kernel::Instance().GetUserPageManager();
 
 	unsigned long srcAddress = current->p_addr;
-	unsigned long desAddress = userPageManager.AllocMemory(current->p_size);
+	unsigned long desAddress = userPageManager.AllocMemory(PageManager::PAGE_SIZE);
 	// Diagnose::Write("srcAddress %x\n", srcAddress);
 	// Diagnose::Write("desAddress %x\n", desAddress);
 	if (desAddress == 0) /* 内存不够，需要swap */
@@ -215,51 +201,15 @@ int ProcessManager::NewProc()
 	}
 	else
 	{
-		int n = current->p_size;
 		child->p_addr = desAddress;
-		while (n--)
-		{
-			Utility::CopySeg(srcAddress++, desAddress++);
-		}
+		for (int n = 0; n < PageManager::PAGE_SIZE; n++)
+			Utility::CopySeg(current->p_addr + n, desAddress + n);
 	}
 
-	//child->p_addr = desAddress;
-	//Utility::CopySeg(current->p_addr, desAddress);
-
-	/*if (pgTable)
+	if (pgTable)
 	{
 		ProcessManager::ModifyPageTable(userPageManager, pgTable);
-		FlushPageDirectory(current->GetPageDirectoryPhyAddr());
 		Utility::MemCopy((unsigned long)pgTable, (unsigned long)desPgTable, sizeof(PageTable));
-	}*/
-
-	for (int i = 1; i < PageTable::ENTRY_CNT_PER_PAGETABLE; i++)
-	{
-		if (desPgTable->m_Entrys[i].m_Present && desPgTable->m_Entrys[i].m_ReadWriter && desPgTable->m_Entrys[i].m_UserSupervisor)
-		{
-			// srcAddr 和 desAddr 都是物理地址
-			unsigned long srcAddr = (pgTable->m_Entrys[i].m_PageBaseAddress) * PageManager::PAGE_SIZE;
-			unsigned long desAddr = userPageManager.AllocMemory(PageManager::PAGE_SIZE);
-
-			if (desAddr == 0) /* 内存不够，需要swap */
-			{
-				current->p_stat = Process::SIDL;
-				/* 子进程p_addr指向父进程图像，因为子进程换出至交换区需要以父进程图像为蓝本 */
-				child->p_addr = current->p_addr;
-				SaveU(u.u_ssav);
-				this->XSwap(child, false, 0);
-				child->p_flag |= Process::SSWAP;
-				current->p_stat = Process::SRUN;
-			}
-			else
-			{
-				for (int j = 0; j < PageManager::PAGE_SIZE; j++)
-				{
-					Utility::CopySeg(srcAddr + j, desAddr + j);
-				}
-				desPgTable->m_Entrys[i].m_PageBaseAddress = desAddr / PageManager::PAGE_SIZE;
-			}
-		}
 	}
 
 	u.u_procp = current;
@@ -378,33 +328,6 @@ loop:
 		}
 	}
 
-	/*if (!(pSelected->p_flag & Process::SLOAD))
-	{
-		UserPageManager &userPageMgr = Kernel::Instance().GetUserPageManager();
-		unsigned int size = pSelected->p_size;
-		if (pSelected->p_textp != NULL && 0 == pSelected->p_textp->x_ccount)
-		{
-			size += pSelected->p_textp->x_size;
-		}
-		unsigned long desAddress = userPageMgr.AllocMemory(size);
-		if (desAddress == 0)
-		{
-			X86Assembly::STI();
-			goto sloop;
-		}
-		pSelected->p_addr = desAddress;
-		pSelected->p_flag |= Process::SLOAD;
-	}
-	X86Assembly::STI();
-
-	X86Assembly::CLI();
-	Process *selected = Select();
-	if (selected->p_flag & Process::SLOAD)
-	{
-		X86Assembly::STI();
-		goto loop;
-	}
-	X86Assembly::STI();*/
 	/* 如果没有符合条件的进程，0#进程睡眠等待有需要换入的进程 */
 	if (-1 == seconds)
 	{
@@ -671,7 +594,6 @@ void ProcessManager::Exec()
 	if (parser.HeaderLoad(pInode) == false)
 	{
 		fileMgr.m_InodeTable->IPut(pInode);
-		// this->ExeCnt--;
 		return;
 	}
 
@@ -679,44 +601,16 @@ void ProcessManager::Exec()
 	{
 		fileMgr.m_InodeTable->IPut(pInode);
 		u.u_error = User::ENOMEM;
-		// this->ExeCnt--;
 		return;
 	}
-
-	/*if ((parser.TextSize + PageManager::PAGE_SIZE - 1) / PageManager::PAGE_SIZE > Text::TEXT_PAGE_MAX)
-	{
-		fileMgr.m_InodeTable->IPut(pInode);
-		u.u_error = User::ENOMEM;
-		this->ExeCnt--;
-		return;
-	}*/
 
 	X86Assembly::CLI();
 	int pages = (parser.StackSize + PageManager::PAGE_SIZE - 1) >> 12;
 	int allocLength = pages << 12;
 	const int STACK_PAGE_MAX = 256;
-	// unsigned long stackFrames[STACK_PAGE_MAX];
 	unsigned long trueStack = (userPgMgr.AllocMemory(allocLength)) >> 12; // 为用户栈分配物理页框，没有考虑内存不足的情况
 
-	/*if (pages > STACK_PAGE_MAX)
-	{
-		X86Assembly::STI();
-		fileMgr.m_InodeTable->IPut(pInode);
-		u.u_error = User::ENOMEM;
-		this->ExeCnt--;
-		return;
-	}*/
-
 	PageTableEntry *tempEntrys = (PageTableEntry *)Machine::Instance().GetUserPageTableArray();
-	/*for (int i = 0; i < pages; i++)
-	{
-		unsigned long frame = userPgMgr.AllocMemory(M_PAGE_SIZE) >> 12;
-		stackFrames[i] = frame;
-		tempEntrys[i + 1].m_UserSupervisor = 0x1;
-		tempEntrys[i + 1].m_Present = 0x1;
-		tempEntrys[i + 1].m_ReadWriter = true;
-		tempEntrys[i + 1].m_PageBaseAddress = frame;
-	}*/
 
 	for (int i = 1; i <= pages; i++, trueStack++)
 	{
@@ -791,16 +685,18 @@ void ProcessManager::Exec()
 	PageTable *pUserPageTable = u.u_MemoryDescriptor.m_UserPageTableArray;
 	MemoryDescriptor &md = u.u_MemoryDescriptor;
 
-	/*int index = (md.m_DataStartAddress >> 12) - PageTable::ENTRY_CNT_PER_PAGETABLE;
+	// 释放数据段
+	int index = (md.m_DataStartAddress >> 12) - 1024;
 	int count = (md.m_DataSize + PageManager::PAGE_SIZE - 1) / PageManager::PAGE_SIZE;
 	unsigned long frame;
 
 	while (count)
 	{
-		frame = pUserPageTable->m_Entrys[index].m_PageBaseAddress;
+		frame = pUserPageTable->m_Entrys[index].m_PageBaseAddress; // 释放物理页框
 		userPgMgr.FreeMemory(PageManager::PAGE_SIZE, frame << 12);
+		// userPgMgr.Page[frame]--;
 
-		pUserPageTable->m_Entrys[index].m_Present = 0;
+		pUserPageTable->m_Entrys[index].m_Present = 0; // 清空PTE
 		pUserPageTable->m_Entrys[index].m_ReadWriter = 0;
 		pUserPageTable->m_Entrys[index].m_UserSupervisor = 1;
 		pUserPageTable->m_Entrys[index].m_PageBaseAddress = 0;
@@ -809,21 +705,23 @@ void ProcessManager::Exec()
 		count--;
 	}
 
-	index = ((md.USER_SPACE_START_ADDRESS + md.USER_SPACE_SIZE - md.m_StackSize) >> 12) - PageTable::ENTRY_CNT_PER_PAGETABLE;
+	// 释放栈段
+	index = ((md.USER_SPACE_START_ADDRESS + md.USER_SPACE_SIZE - md.m_StackSize) >> 12) - 1024;
 	count = (md.m_StackSize + PageManager::PAGE_SIZE - 1) / PageManager::PAGE_SIZE;
 	while (count)
 	{
-		frame = pUserPageTable->m_Entrys[index].m_PageBaseAddress;
+		frame = pUserPageTable->m_Entrys[index].m_PageBaseAddress; // 释放物理页框
 		userPgMgr.FreeMemory(PageManager::PAGE_SIZE, frame << 12);
+		// userPgMgr.Page[frame] --;
 
-		pUserPageTable->m_Entrys[index].m_Present = 0;
+		pUserPageTable->m_Entrys[index].m_Present = 0; // 清空PTE
 		pUserPageTable->m_Entrys[index].m_ReadWriter = 0;
 		pUserPageTable->m_Entrys[index].m_UserSupervisor = 1;
 		pUserPageTable->m_Entrys[index].m_PageBaseAddress = 0;
 
 		index++;
 		count--;
-	}*/
+	}
 
 	u.u_MemoryDescriptor.m_TextStartAddress = parser.TextAddress;
 	u.u_MemoryDescriptor.m_TextSize = parser.TextSize;
@@ -855,13 +753,6 @@ void ProcessManager::Exec()
 
 	PageTableEntry *entrys = (PageTableEntry *)md.m_UserPageTableArray;
 	pages = (u.u_MemoryDescriptor.m_TextSize + PageManager::PAGE_SIZE - 1) / PageManager::PAGE_SIZE;
-	/*if (pages > Text::TEXT_PAGE_MAX)
-	{
-		fileMgr.m_InodeTable->IPut(pInode);
-		u.u_error = User::ENOMEM;
-		this->ExeCnt--;
-		return;
-	}*/
 	int text_page_start = parser.TextAddress >> 12;
 	text_page_start -= PageTable::ENTRY_CNT_PER_PAGETABLE;
 

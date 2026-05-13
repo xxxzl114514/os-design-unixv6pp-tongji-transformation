@@ -243,7 +243,9 @@ void Exception::PageFault(struct pt_regs *regs, struct pte_context *context)
 	unsigned char RW = md.m_UserPageTableArray->m_Entrys[(cr2 >> 12) - 1024].m_ReadWriter;
 
 	// 思路：需要处理 COW 的情况是缺页异常发生在数据段或者堆栈段 &R/W 位内容为 Read Only &引用计数器（Page）>= 1
+	Process *pcurrent = NULL;
 	UserPageManager &userPageMgr = Kernel::Instance().GetUserPageManager();
+	ProcessManager &procMgr = Kernel::Instance().GetProcessManager();
 	bool isWriteFault = (context->error_code & 0x2) != 0;
 	bool isRW = (cr2 >= md.m_DataStartAddress && cr2 < md.m_DataStartAddress + md.m_DataSize) ||
 				(cr2 >= MemoryDescriptor::USER_SPACE_SIZE - md.m_StackSize && cr2 < MemoryDescriptor::USER_SPACE_SIZE);
@@ -251,12 +253,11 @@ void Exception::PageFault(struct pt_regs *regs, struct pte_context *context)
 	// 子进程和父进程没有区别，任意先上台的进程，申请新的空间，复制原本的内容使用
 	// 如果是子进程，则是申请新空间，指向新空间
 	// 如果是父进程，则可以理解为，将原本的空间让给子进程，自己利用新申请的空间
-	/*if (RW == 0 && userPageMgr.Page[physicalBase] >= 1 && isRW && isWriteFault)
+	if (RW == 0 && userPageMgr.Page[physicalBase] >= 1 && isRW)
 	{
 		if (userPageMgr.Page[physicalBase] == 1)
 		{
 			md.m_UserPageTableArray->m_Entrys[(cr2 >> 12) - 1024].m_ReadWriter = 1;
-			FlushPageDirectory(u.u_procp->GetPageDirectoryPhyAddr());
 			return;
 		}
 		else
@@ -269,10 +270,19 @@ void Exception::PageFault(struct pt_regs *regs, struct pte_context *context)
 			md.m_UserPageTableArray->m_Entrys[(cr2 >> 12) - 1024].m_ReadWriter = 1;
 			userPageMgr.Page[newPage >> 12] = 1;
 
+			for (int i = 0; i < procMgr.NPROC; ++i)
+			{
+				if (procMgr.process[i].p_pid == current->p_ppid)
+				{
+					pcurrent = &procMgr.process[i];
+					break;
+				}
+			}
+
 			Utility::CopySeg(physicalBase << 12, newPage);
-			FlushPageDirectory(u.u_procp->GetPageDirectoryPhyAddr());
 			return;
-		}*/
+		}
+	}
 
 	/*由缺页异常处理程序每次扩展一页，如果合理的缺了多张堆栈页面，那就多执行几次缺页异常，直到把这些页面补齐*/
 
